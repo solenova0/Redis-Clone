@@ -22,6 +22,7 @@ func NewReader(r io.Reader) *Reader {
 // Requests are either RESP arrays of bulk strings or inline commands
 // (space-separated text lines, as typed into nc/telnet). Empty requests are
 // skipped. It returns io.EOF only on a clean end of stream between commands.
+// The returned argument slices are freshly allocated and owned by the caller.
 func (r *Reader) ReadCommand() ([][]byte, error) {
 	for {
 		b, err := r.br.Peek(1)

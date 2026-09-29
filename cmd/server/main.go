@@ -10,6 +10,7 @@ import (
 
 	"github.com/solenova0/Redis-Clone/internal/command"
 	"github.com/solenova0/Redis-Clone/internal/server"
+	"github.com/solenova0/Redis-Clone/internal/store"
 )
 
 func main() {
@@ -17,7 +18,7 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	srv := server.New(*addr, command.NewDispatcher(), logger)
+	srv := server.New(*addr, command.NewDispatcher(store.New()), logger)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)

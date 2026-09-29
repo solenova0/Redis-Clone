@@ -6,11 +6,13 @@ import (
 	"strings"
 
 	"github.com/solenova0/Redis-Clone/internal/protocol"
+	"github.com/solenova0/Redis-Clone/internal/store"
 )
 
 // Context carries per-request state into a handler.
 type Context struct {
-	Args [][]byte // Args[0] is the command name.
+	Args  [][]byte // Args[0] is the command name.
+	Store *store.Store
 	// Quit is set by a handler to ask the connection to close after replying.
 	Quit bool
 }
@@ -30,11 +32,14 @@ type Command struct {
 // and therefore safe for concurrent use.
 type Dispatcher struct {
 	commands map[string]*Command
+	store    *store.Store
 }
 
-func NewDispatcher() *Dispatcher {
-	d := &Dispatcher{commands: make(map[string]*Command)}
+func NewDispatcher(s *store.Store) *Dispatcher {
+	d := &Dispatcher{commands: make(map[string]*Command), store: s}
 	registerServerCommands(d)
+	registerStringCommands(d)
+	registerKeyCommands(d)
 	return d
 }
 
@@ -55,7 +60,7 @@ func (d *Dispatcher) Dispatch(args [][]byte) (protocol.Value, bool) {
 	if (cmd.Arity > 0 && len(args) != cmd.Arity) || (cmd.Arity < 0 && len(args) < -cmd.Arity) {
 		return protocol.Errorf("ERR wrong number of arguments for '%s' command", cmd.Name), false
 	}
-	ctx := &Context{Args: args}
+	ctx := &Context{Args: args, Store: d.store}
 	reply := cmd.Handler(ctx)
 	return reply, ctx.Quit
 }

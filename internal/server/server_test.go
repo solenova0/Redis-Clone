@@ -14,6 +14,7 @@ import (
 
 	"github.com/solenova0/Redis-Clone/internal/command"
 	"github.com/solenova0/Redis-Clone/internal/protocol"
+	"github.com/solenova0/Redis-Clone/internal/store"
 )
 
 func startServer(t *testing.T) (*Server, string) {
@@ -22,7 +23,7 @@ func startServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New("", command.NewDispatcher(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New("", command.NewDispatcher(store.New()), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ln) }()
 	t.Cleanup(func() {
@@ -77,6 +78,42 @@ func TestPingEcho(t *testing.T) {
 	expect(t, r, protocol.BulkString("inline"))
 	conn.Write(cmd("FOO"))
 	expect(t, r, protocol.Error("ERR unknown command 'FOO', with args beginning with:"))
+}
+
+func TestStringCommands(t *testing.T) {
+	_, addr := startServer(t)
+	conn := dial(t, addr)
+	r := protocol.NewReader(conn)
+
+	steps := []struct {
+		req  []byte
+		want protocol.Value
+	}{
+		{cmd("GET", "name"), protocol.NullBulk()},
+		{cmd("SET", "name", "Solan"), protocol.OK()},
+		{cmd("GET", "name"), protocol.BulkString("Solan")},
+		{[]byte("set age 22\r\n"), protocol.OK()},
+		{cmd("EXISTS", "name", "age", "nope"), protocol.Integer(2)},
+		{cmd("DEL", "name", "nope"), protocol.Integer(1)},
+		{cmd("GET", "name"), protocol.NullBulk()},
+		{cmd("SET", "k"), protocol.Error("ERR wrong number of arguments for 'set' command")},
+		{cmd("SET", "k", "v", "EX", "10"), protocol.Error("ERR syntax error")},
+	}
+	for _, s := range steps {
+		conn.Write(s.req)
+		expect(t, r, s.want)
+	}
+}
+
+func TestClientsShareKeyspace(t *testing.T) {
+	_, addr := startServer(t)
+	a := dial(t, addr)
+	b := dial(t, addr)
+
+	a.Write(cmd("SET", "shared", "from-a"))
+	expect(t, protocol.NewReader(a), protocol.OK())
+	b.Write(cmd("GET", "shared"))
+	expect(t, protocol.NewReader(b), protocol.BulkString("from-a"))
 }
 
 func TestPipelinedAndSplitWrites(t *testing.T) {
@@ -208,7 +245,7 @@ func TestCloseDisconnectsClients(t *testing.T) {
 }
 
 func TestServeAfterClose(t *testing.T) {
-	srv := New("", command.NewDispatcher(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New("", command.NewDispatcher(store.New()), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv.Close()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

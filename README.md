@@ -10,8 +10,9 @@ It uses only the Go standard library.
 |-------|-------|-------|
 | 1 | TCP server, one goroutine per client, graceful shutdown | Done |
 | 2 | RESP parser/encoder, command dispatcher, `PING` / `ECHO` / `QUIT` | Done |
-| 3 | In-memory store: `SET` `GET` `DEL` `EXISTS` | Next |
-| 4–9 | More commands, TTL, AOF, benchmarks, Docker, config | Planned |
+| 3 | In-memory store: `SET` `GET` `DEL` `EXISTS` | Done |
+| 4 | `INCR` `DECR` `APPEND` `MGET` `MSET` `KEYS` `TYPE` | Next |
+| 5–9 | TTL, AOF, benchmarks, Docker, config | Planned |
 
 ## Architecture
 
@@ -21,6 +22,7 @@ flowchart LR
     Conn --> Parser[protocol: RESP reader]
     Parser --> Dispatcher[command: dispatcher]
     Dispatcher --> Handler[command handler]
+    Handler --> Store[store: sharded keyspace]
     Handler --> Encoder[protocol: RESP encoder]
     Encoder -->|buffered write| Client
 ```
@@ -30,6 +32,7 @@ cmd/server/          entry point: flags, logging, signal handling
 internal/server/     TCP listener, per-connection loop, shutdown
 internal/protocol/   RESP types, streaming parser, encoder
 internal/command/    dispatcher and command handlers
+internal/store/      concurrency-safe in-memory keyspace
 ```
 
 ## RESP implementation
@@ -43,6 +46,15 @@ internal/command/    dispatcher and command handlers
 
 Each accepted connection gets its own goroutine. The server tracks live connections so `Close()` (triggered by SIGINT/SIGTERM) stops the listener, closes every client, and waits for their goroutines to exit. The dispatcher is read-only after construction, so it is shared without locks.
 
+### Storage and locking
+
+The keyspace is split into 64 shards. Each shard is a `map[string]*entry` guarded by its own `sync.RWMutex`, and every entry records its data type so later types (and `WRONGTYPE` errors) fit in without changing the layout.
+
+- **Why shards instead of one global lock:** clients working on different keys usually hit different shards, so they don't serialize on a single mutex. Reads take the shared lock, so concurrent `GET`s on the same shard don't block each other either.
+- **Shard selection:** `hash/maphash` with a random per-process seed, so a client can't pick keys that all land in one shard.
+- **Immutable values:** stored byte slices are never modified in place. A reader can release the lock and encode the value without it changing underneath. Commands that modify a value (e.g. `APPEND`) must build a new slice.
+- **Atomicity:** each single-key operation is atomic. Multi-key `DEL`/`EXISTS` lock one shard at a time, so they're atomic per key, not across all keys. Commands that need all-or-nothing behavior (e.g. `MSET`) will lock every shard they touch, in a fixed order to avoid deadlock.
+
 ## Commands
 
 | Command | Notes |
@@ -50,6 +62,10 @@ Each accepted connection gets its own goroutine. The server tracks live connecti
 | `PING [message]` | `PONG`, or echoes `message` |
 | `ECHO message` | |
 | `QUIT` | replies `OK`, then closes the connection |
+| `SET key value` | options such as `EX`/`NX` not yet supported (`ERR syntax error`) |
+| `GET key` | null bulk (`$-1`) if missing |
+| `DEL key [key ...]` | number of keys removed |
+| `EXISTS key [key ...]` | number of keys that exist; repeats count again |
 
 Arity is checked centrally, Redis-style (positive = exact, negative = minimum). Errors match Redis wording, e.g. `ERR wrong number of arguments for 'echo' command`.
 
@@ -66,9 +82,10 @@ make build            # bin/redis-clone
 Try it:
 
 ```sh
-redis-cli -p 6379 PING
+redis-cli -p 6379 SET name Solan
+redis-cli -p 6379 GET name
 # or without redis-cli:
-printf 'PING\r\nECHO hello\r\n' | nc localhost 6379
+printf 'SET name Solan\r\nGET name\r\n' | nc localhost 6379
 ```
 
 ## Testing
@@ -80,4 +97,4 @@ make benchmark
 go test -fuzz FuzzReadCommand -fuzztime 30s ./internal/protocol
 ```
 
-The tests cover RESP parsing (all types, invalid input, truncated input, byte-at-a-time reads, large values), encoding round trips, dispatcher arity and errors, and end-to-end TCP behavior: pipelining, fragmented writes, protocol errors, `QUIT`, 50 concurrent clients, and shutdown.
+The tests cover RESP parsing (all types, invalid input, truncated input, byte-at-a-time reads, large values), encoding round trips, dispatcher arity and errors, and store operations under concurrent access. End-to-end TCP tests cover pipelining, fragmented writes, protocol errors, `QUIT`, keys shared between clients, 50 concurrent clients, and shutdown.

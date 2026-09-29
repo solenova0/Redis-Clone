@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/solenova0/Redis-Clone/internal/protocol"
+	"github.com/solenova0/Redis-Clone/internal/store"
 )
 
 func args(s string) [][]byte {
@@ -17,7 +18,7 @@ func args(s string) [][]byte {
 }
 
 func TestDispatch(t *testing.T) {
-	d := NewDispatcher()
+	d := NewDispatcher(store.New())
 	tests := []struct {
 		in   string
 		want protocol.Value
@@ -43,8 +44,45 @@ func TestDispatch(t *testing.T) {
 }
 
 func TestDispatchEmpty(t *testing.T) {
-	got, _ := NewDispatcher().Dispatch(nil)
+	got, _ := NewDispatcher(store.New()).Dispatch(nil)
 	if got.Type != protocol.TypeError {
 		t.Fatalf("got %#v, want error", got)
+	}
+}
+
+func TestStringAndKeyCommands(t *testing.T) {
+	d := NewDispatcher(store.New())
+	wrongArgs := func(name string) protocol.Value {
+		return protocol.Error("ERR wrong number of arguments for '" + name + "' command")
+	}
+	// Steps run in order against one store.
+	steps := []struct {
+		in   string
+		want protocol.Value
+	}{
+		{"GET k", protocol.NullBulk()},
+		{"SET k v1", protocol.OK()},
+		{"GET k", protocol.BulkString("v1")},
+		{"SET k v2", protocol.OK()},
+		{"get k", protocol.BulkString("v2")},
+		{"SET a 1", protocol.OK()},
+		{"EXISTS k a missing k", protocol.Integer(3)},
+		{"DEL k missing", protocol.Integer(1)},
+		{"DEL k", protocol.Integer(0)},
+		{"EXISTS k", protocol.Integer(0)},
+		{"SET k v x", protocol.Error("ERR syntax error")},
+
+		{"SET", wrongArgs("set")},
+		{"SET k", wrongArgs("set")},
+		{"GET", wrongArgs("get")},
+		{"GET a b", wrongArgs("get")},
+		{"DEL", wrongArgs("del")},
+		{"EXISTS", wrongArgs("exists")},
+	}
+	for _, s := range steps {
+		got, _ := d.Dispatch(args(s.in))
+		if !reflect.DeepEqual(got, s.want) {
+			t.Errorf("%q: got %#v, want %#v", s.in, got, s.want)
+		}
 	}
 }
